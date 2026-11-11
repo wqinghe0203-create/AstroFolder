@@ -167,6 +167,41 @@
       box-shadow: 0 4px 12px rgba(37, 99, 235, 0.32);
     }
 
+    /* 视图切换分段控制器 (Segmented Tab Controls) */
+    .layout-toggle-group {
+      display: inline-flex;
+      background: rgba(241, 245, 249, 0.95);
+      border: 1px solid rgba(226, 232, 240, 0.9);
+      border-radius: 9px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .btn-tab {
+      background: transparent;
+      border: none;
+      color: #64748b;
+      font-size: 11.5px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      font-family: inherit;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn-tab:hover {
+      color: #0f172a;
+      background: rgba(255, 255, 255, 0.7);
+    }
+    .btn-tab.active {
+      background: #ffffff;
+      color: #2563eb;
+      font-weight: 600;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    }
+
     /* 状态胶囊 */
     .status-capsule {
       display: flex;
@@ -434,6 +469,16 @@
     <div class="nav-center" id="breadcrumbBar"></div>
 
     <div class="tools-group">
+      <!-- 视图模式分段控制器 (思维导图 / 双向脑图 / 星轨雷达) -->
+      <div class="layout-toggle-group">
+        <button class="btn-tab active" id="btnLayoutTree" title="脑图导向模式：层级横向展开，100%杜绝上下层重叠遮挡">🧠 树状导图</button>
+        <button class="btn-tab" id="btnLayoutBilateral" title="双向平衡导图：左右均衡延展">⚖️ 双向导图</button>
+        <button class="btn-tab" id="btnLayoutOrbit" title="星轨雷达模式：经典环形分布">🪐 星轨雷达</button>
+      </div>
+      <button class="btn" id="btnResetView" title="重置视野视角并居中展示">
+        <span>🎯</span> 居中
+      </button>
+
       <button class="btn btn-primary" id="btnSwitchPreset">
         <span>🔄</span> 案例: 空白5项 / 银座16项 / E盘
       </button>
@@ -447,13 +492,15 @@
         <span>🔊</span> 音效: 开
       </button>
 
-      <!-- 快捷操作提示 (从底部移至顶部右上角，避免遮挡下方展开子项) -->
+      <!-- 快捷操作提示 -->
       <div class="top-hud">
         <div class="hud-chip"><kbd>悬停</kbd> <span>发散</span></div>
         <span class="hud-sep">·</span>
         <div class="hud-chip"><kbd>单击</kbd> <span>深入</span></div>
         <span class="hud-sep">·</span>
         <div class="hud-chip"><kbd>双击</kbd> <span>打开</span></div>
+        <span class="hud-sep">·</span>
+        <div class="hud-chip"><kbd>拖拽/滚轮</kbd> <span>平移/缩放</span></div>
         <span class="hud-sep">·</span>
         <div class="hud-chip"><kbd>⌫</kbd> <span>返回</span></div>
       </div>
@@ -808,182 +855,321 @@
       });
     }
 
-    let renderedNodes = [];
+    // 布局模式：'tree' (脑图树状) | 'bilateral' (双向脑图) | 'orbit' (星轨雷达)
+    let currentLayoutMode = 'tree';
 
-    function render() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      renderedNodes = [];
+    // 虚拟摄像机系统 (平移与缩放引擎)
+    let camera = { x: 0, y: 0, zoom: 1.0 };
+    let isDraggingCanvas = false;
+    let dragStartX = 0, dragStartY = 0;
+    let cameraDragStart = { x: 0, y: 0 };
+    let hasDragged = false;
 
-      const cx = Math.round(canvas.width / 2);
-      const cy = Math.round(canvas.height / 2 + 12);
-
-      // 1. 绘制淡化微弱的极坐标轨道虚线 (淡化处理，视觉重心下沉在卡片上)
-      drawFaintOrbitGuides(cx, cy);
-
-      const items = currentRoot.children || [];
-      const n = items.length;
-
-      // 2. 自适应星系半径计算
-      let rxBase, ryBase;
-      if (n <= 4) {
-        rxBase = Math.min(canvas.width * 0.22, 225);
-        ryBase = Math.min(canvas.height * 0.22, 150);
-      } else if (n <= 8) {
-        rxBase = Math.min(canvas.width * 0.26, 275);
-        ryBase = Math.min(canvas.height * 0.26, 185);
+    function resetView() {
+      if (currentLayoutMode === 'tree') {
+        camera.x = Math.max(120, Math.round(canvas.width * 0.16));
+        camera.y = Math.round(canvas.height * 0.5);
+        camera.zoom = 1.0;
       } else {
-        rxBase = Math.min(canvas.width * 0.36, 385);
-        ryBase = Math.min(canvas.height * 0.36, 260);
+        camera.x = Math.round(canvas.width * 0.5);
+        camera.y = Math.round(canvas.height * 0.5);
+        camera.zoom = 1.0;
       }
+      render();
+    }
 
-      const rxInner = Math.min(canvas.width * 0.23, 245);
-      const ryInner = Math.min(canvas.height * 0.23, 165);
-      const rxOuter = Math.min(canvas.width * 0.37, 390);
-      const ryOuter = Math.min(canvas.height * 0.37, 265);
+    // 动态全字宽精确测量引擎 (杜绝字符截断，让每个卡片天然完整包裹全文件名)
+    function measureNodeDimensions(item, level) {
+      const isCenter = (level === 0);
+      const h = isCenter ? 58 : (level === 1 ? 44 : 38);
+      const iconSize = isCenter ? 28 : (level === 1 ? 26 : 22);
+      const theme = isCenter ? null : getItemTheme(item);
 
-      const l1Calculated = [];
-
-      // 3. 计算一级节点
-      for (let i = 0; i < n; i++) {
-        const item = items[i];
-        const angle = -Math.PI / 2 + (2 * Math.PI * i) / n;
-        const curRx = (n > 8) ? (i % 2 === 0 ? rxInner : rxOuter) : rxBase;
-        const curRy = (n > 8) ? (i % 2 === 0 ? ryInner : ryOuter) : ryBase;
-
-        const nx = Math.round(cx + curRx * Math.cos(angle));
-        const ny = Math.round(cy + curRy * Math.sin(angle));
-
-        l1Calculated.push({
-          item,
-          level: 1,
-          x: nx,
-          y: ny,
-          angle,
-          w: STYLE.cardL1.w,
-          h: STYLE.cardL1.h
-        });
-      }
-
-      // 4. 多轮物理斥力防重叠松弛迭代
-      const cardW = STYLE.cardL1.w;
-      const cardH = STYLE.cardL1.h;
-      const centerW = STYLE.center.w;
-      const centerH = STYLE.center.h;
-
-      for (let step = 0; step < 6; step++) {
-        for (const node of l1Calculated) {
-          const dx = node.x - cx;
-          const dy = node.y - cy;
-          const overlapX = (cardW / 2 + centerW / 2 + 14) - Math.abs(dx);
-          const overlapY = (cardH / 2 + centerH / 2 + 14) - Math.abs(dy);
-          if (overlapX > 0 && overlapY > 0) {
-            const dist = Math.hypot(dx, dy) || 1;
-            const push = Math.min(overlapX, overlapY);
-            node.x += Math.round((dx / dist) * push);
-            node.y += Math.round((dy / dist) * push);
-          }
+      let badgeW = 0;
+      if (isCenter) {
+        badgeW = 0;
+      } else if (item.isDir) {
+        const count = (item.count !== undefined) ? item.count : (item.children ? item.children.length : 0);
+        if (count > 0) {
+          badgeW = Math.max(22, String(count).length * 6.5 + 12);
         }
-        for (let i = 0; i < l1Calculated.length; i++) {
-          for (let j = i + 1; j < l1Calculated.length; j++) {
-            const n1 = l1Calculated[i];
-            const n2 = l1Calculated[j];
-            const dx = n2.x - n1.x;
-            const dy = n2.y - n1.y;
-            const minDx = cardW + 12;
-            const minDy = cardH + 8;
-            const overlapX = minDx - Math.abs(dx);
-            const overlapY = minDy - Math.abs(dy);
-            if (overlapX > 0 && overlapY > 0) {
-              if (overlapX < overlapY) {
-                const shift = Math.round(overlapX * 0.55);
-                const sgn = dx >= 0 ? 1 : -1;
-                n2.x += shift * sgn;
-                n1.x -= shift * sgn;
-              } else {
-                const shift = Math.round(overlapY * 0.55);
-                const sgn = dy >= 0 ? 1 : -1;
-                n2.y += shift * sgn;
-                n1.y -= shift * sgn;
-              }
+      } else {
+        const fmtStr = theme.tag;
+        badgeW = Math.max(34, fmtStr.length * 5.5 + 10);
+      }
+
+      ctx.save();
+      ctx.font = (isCenter ? "600 13px " : (level === 1 ? "500 12px " : "500 11px ")) +
+        "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+      const nameStr = item.name || "工作区根目录";
+      const nameW = ctx.measureText(nameStr).width;
+      ctx.restore();
+
+      const minW = isCenter ? 190 : (level === 1 ? 140 : 126);
+      // 12 (左内边距) + iconSize + 10 (图标右间隔) + nameW + (badgeW > 0 ? (badgeW + 10) : 0) + 12 (右内边距)
+      const naturalW = Math.ceil(12 + iconSize + 10 + nameW + (badgeW > 0 ? (badgeW + 10) : 0) + 12);
+      const w = Math.max(minW, naturalW);
+
+      return { w, h, iconSize, badgeW };
+    }
+
+    // 思维导图树状无重叠布局计算引擎 (Mind Map Strict Vertical Separation)
+    function calculateMindMapLayout(rootItem, activeL1, mode = 'tree') {
+      const gapY = 14;
+      const colDist = 76;
+      const l1Items = rootItem.children || [];
+      const rootDims = measureNodeDimensions(rootItem, 0);
+
+      const rootNode = {
+        item: rootItem,
+        level: 0,
+        isCenter: true,
+        x: 0,
+        y: 0,
+        w: rootDims.w,
+        h: rootDims.h
+      };
+
+      if (mode === 'tree') {
+        // 单向右侧发散树 (Rightward Mind Map)
+        const l1Nodes = [];
+        let totalL1Height = 0;
+
+        for (const item of l1Items) {
+          const dims = measureNodeDimensions(item, 1);
+          const isExpanded = (item === activeL1);
+          let subtreeH = dims.h;
+          const childrenNodes = [];
+
+          if (isExpanded && item.children && item.children.length > 0) {
+            let totalChildH = 0;
+            for (const child of item.children) {
+              const cDims = measureNodeDimensions(child, 2);
+              totalChildH += cDims.h;
+              childrenNodes.push({
+                item: child,
+                level: 2,
+                w: cDims.w,
+                h: cDims.h,
+                badgeW: cDims.badgeW,
+                iconSize: cDims.iconSize
+              });
+            }
+            totalChildH += (childrenNodes.length - 1) * gapY;
+            subtreeH = Math.max(dims.h, totalChildH);
+          }
+
+          l1Nodes.push({
+            item,
+            level: 1,
+            w: dims.w,
+            h: dims.h,
+            badgeW: dims.badgeW,
+            iconSize: dims.iconSize,
+            subtreeH,
+            isExpanded,
+            children: childrenNodes
+          });
+          totalL1Height += subtreeH;
+        }
+        totalL1Height += Math.max(0, l1Nodes.length - 1) * gapY;
+
+        let curY = -totalL1Height / 2;
+        const l1StartX = rootNode.x + rootNode.w / 2 + colDist;
+        const allL2Nodes = [];
+
+        for (const node of l1Nodes) {
+          const nodeCenterY = curY + node.subtreeH / 2;
+          node.x = l1StartX + node.w / 2;
+          node.y = nodeCenterY;
+
+          if (node.isExpanded && node.children.length > 0) {
+            let totalChildH = 0;
+            for (const c of node.children) totalChildH += c.h;
+            totalChildH += (node.children.length - 1) * gapY;
+
+            let childCurY = nodeCenterY - totalChildH / 2;
+            const l2StartX = node.x + node.w / 2 + colDist;
+            for (const child of node.children) {
+              child.x = l2StartX + child.w / 2;
+              child.y = childCurY + child.h / 2;
+              child.parent = node;
+              childCurY += child.h + gapY;
+              allL2Nodes.push(child);
             }
           }
+
+          curY += node.subtreeH + gapY;
         }
-        const padX = cardW / 2 + 10;
-        const padY = cardH / 2 + 10;
-        for (const node of l1Calculated) {
-          node.x = Math.max(padX, Math.min(canvas.width - padX, node.x));
-          node.y = Math.max(padY, Math.min(canvas.height - padY, node.y));
-        }
-      }
 
-      // 5. 计算二级节点
-      let l2Calculated = [];
-      const activeNodeObj = l1Calculated.find(n => n.item === activeL1Node);
-      if (activeNodeObj && activeNodeObj.item.children) {
-        l2Calculated = calculateL2Nodes(activeNodeObj);
-      }
-
-      // 6. 连线层级严格置于卡片下层 (z-index 低于节点卡片)
-      // 计算当前悬停链路，用于关联连线高亮与其余非关联连线智能虚化 (opacity: 0.15)
-      const hoveredItem = hoveredNode ? hoveredNode.item : null;
-      const isAnyHovered = !!hoveredItem;
-
-      // 绘制一级平滑三阶贝塞尔曲线 (Cubic Bezier，带两端 5px padding 与渐变淡出)
-      for (const node of l1Calculated) {
-        const isHovered = (hoveredItem === node.item);
-        const isActive = (activeL1Node === node.item);
-        let isDimmed = false;
-        if (isAnyHovered) {
-          const isParentOfHovered = activeNodeObj && activeNodeObj.item === node.item && l2Calculated.some(c => c.item === hoveredItem);
-          if (!isHovered && !isParentOfHovered) {
-            isDimmed = true;
+        return { rootNode, l1Nodes, l2Nodes: allL2Nodes };
+      } else {
+        // 双向脑图模式 (Bilateral Mind Map)
+        const leftItems = [];
+        const rightItems = [];
+        l1Items.forEach((item, idx) => {
+          if (idx % 2 === 0) {
+            rightItems.push(item);
+          } else {
+            leftItems.push(item);
           }
-        }
-        drawCubicBezierConnection(
-          { x: cx, y: cy, w: STYLE.center.w, h: STYLE.center.h },
-          { x: node.x, y: node.y, w: STYLE.cardL1.w, h: STYLE.cardL1.h },
-          null, node.angle, 1, isHovered, isActive, isDimmed
-        );
-      }
+        });
 
-      // 7. 绘制二级平滑三阶贝塞尔曲线 (起点沿父节点朝向平滑发散进入子节点，杜绝密集处线条过粗过硬)
-      if (activeNodeObj) {
-        for (const child of l2Calculated) {
-          const isHovered = (hoveredItem === child.item);
-          let isDimmed = false;
-          if (isAnyHovered && !isHovered) {
-            isDimmed = true;
+        function layoutSide(items, dir) {
+          const sideNodes = [];
+          let totalH = 0;
+          for (const item of items) {
+            const dims = measureNodeDimensions(item, 1);
+            const isExpanded = (item === activeL1);
+            let subtreeH = dims.h;
+            const childrenNodes = [];
+
+            if (isExpanded && item.children && item.children.length > 0) {
+              let totalChildH = 0;
+              for (const child of item.children) {
+                const cDims = measureNodeDimensions(child, 2);
+                totalChildH += cDims.h;
+                childrenNodes.push({
+                  item: child,
+                  level: 2,
+                  w: cDims.w,
+                  h: cDims.h,
+                  badgeW: cDims.badgeW,
+                  iconSize: cDims.iconSize
+                });
+              }
+              totalChildH += (childrenNodes.length - 1) * gapY;
+              subtreeH = Math.max(dims.h, totalChildH);
+            }
+
+            sideNodes.push({
+              item,
+              level: 1,
+              w: dims.w,
+              h: dims.h,
+              badgeW: dims.badgeW,
+              iconSize: dims.iconSize,
+              subtreeH,
+              isExpanded,
+              children: childrenNodes,
+              side: dir
+            });
+            totalH += subtreeH;
           }
-          drawCubicBezierConnection(
-            { x: activeNodeObj.x, y: activeNodeObj.y, w: STYLE.cardL1.w, h: STYLE.cardL1.h },
-            { x: child.x, y: child.y, w: STYLE.cardL2.w, h: STYLE.cardL2.h },
-            activeNodeObj.angle, child.angle, 2, isHovered, false, isDimmed
-          );
+          totalH += Math.max(0, sideNodes.length - 1) * gapY;
+
+          let curY = -totalH / 2;
+          const allSideL2 = [];
+          for (const node of sideNodes) {
+            const nodeCenterY = curY + node.subtreeH / 2;
+            if (dir === 1) {
+              const startX = rootNode.x + rootNode.w / 2 + colDist;
+              node.x = startX + node.w / 2;
+            } else {
+              const startX = rootNode.x - rootNode.w / 2 - colDist;
+              node.x = startX - node.w / 2;
+            }
+            node.y = nodeCenterY;
+
+            if (node.isExpanded && node.children.length > 0) {
+              let totalChildH = 0;
+              for (const c of node.children) totalChildH += c.h;
+              totalChildH += (node.children.length - 1) * gapY;
+              let childCurY = nodeCenterY - totalChildH / 2;
+
+              for (const child of node.children) {
+                if (dir === 1) {
+                  const l2StartX = node.x + node.w / 2 + colDist;
+                  child.x = l2StartX + child.w / 2;
+                } else {
+                  const l2StartX = node.x - node.w / 2 - colDist;
+                  child.x = l2StartX - child.w / 2;
+                }
+                child.y = childCurY + child.h / 2;
+                child.parent = node;
+                child.side = dir;
+                childCurY += child.h + gapY;
+                allSideL2.push(child);
+              }
+            }
+
+            curY += node.subtreeH + gapY;
+          }
+
+          return { sideNodes, allSideL2 };
         }
-      }
 
-      // 8. 绘制二级节点卡片 (12px 圆角 + 现代柔和弥散投影)
-      for (const child of l2Calculated) {
-        const isHovered = (hoveredNode && hoveredNode.item === child.item);
-        drawModernCardNode(child, 2, isHovered, false);
-        renderedNodes.push(child);
-      }
+        const leftRes = layoutSide(leftItems, -1);
+        const rightRes = layoutSide(rightItems, 1);
 
-      // 9. 绘制一级节点卡片 (14px 圆角 + 现代柔和弥散投影 + 悬停上浮)
-      for (const node of l1Calculated) {
-        const isHovered = (hoveredNode && hoveredNode.item === node.item);
-        const isActive = (activeL1Node === node.item);
-        drawModernCardNode(node, 1, isHovered, isActive);
-        renderedNodes.push(node);
+        return {
+          rootNode,
+          l1Nodes: [...leftRes.sideNodes, ...rightRes.sideNodes],
+          l2Nodes: [...leftRes.allSideL2, ...rightRes.allSideL2]
+        };
       }
+    }
 
-      // 10. 绘制当前工作区高亮核心卡片 (Active/Current Workspace: 无粗蓝边，微发光+渐变微边+精致Badge)
-      drawActiveWorkspaceCard(cx, cy);
+    // 绘制思维导图 S 型水平平滑贝塞尔流线 (Mind Map Cubic S-Curve)
+    function drawTreeBranchConnection(pNode, cNode, isHovered, isActive, isDimmed) {
+      const isRight = (cNode.x >= pNode.x);
+      const startX = isRight ? (pNode.x + pNode.w / 2) : (pNode.x - pNode.w / 2);
+      const startY = pNode.y;
+      const endX = isRight ? (cNode.x - cNode.w / 2) : (cNode.x + cNode.w / 2);
+      const endY = cNode.y;
 
-      // 11. 全息长文本悬浮气泡
-      if (hoveredNode && hoveredNode.isTruncated && !hoveredNode.isCenter) {
-        drawHoverTooltip(hoveredNode);
+      const dx = endX - startX;
+      const cp1x = startX + dx * 0.5;
+      const cp1y = startY;
+      const cp2x = startX + dx * 0.5;
+      const cp2y = endY;
+
+      ctx.save();
+      if (isHovered || isActive) {
+        ctx.strokeStyle = "rgba(59, 130, 246, 0.22)";
+        ctx.lineWidth = 4.5;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, endX, endY);
+        ctx.stroke();
+
+        const grad = ctx.createLinearGradient(startX, startY, endX, endY);
+        grad.addColorStop(0, "rgba(59, 130, 246, 0.95)");
+        grad.addColorStop(1, "rgba(96, 165, 250, 0.85)");
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, endX, endY);
+        ctx.stroke();
+
+        const t = (Date.now() % 1600) / 1600;
+        const u = 1 - t;
+        const orbX = u*u*u*startX + 3*u*u*t*cp1x + 3*u*t*t*cp2x + t*t*t*endX;
+        const orbY = u*u*u*startY + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*endY;
+        ctx.fillStyle = "#3b82f6";
+        ctx.beginPath();
+        ctx.arc(orbX, orbY, 2.4, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (isDimmed) {
+        ctx.strokeStyle = "rgba(203, 213, 225, 0.20)";
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, endX, endY);
+        ctx.stroke();
+      } else {
+        const normalGrad = ctx.createLinearGradient(startX, startY, endX, endY);
+        normalGrad.addColorStop(0, "rgba(203, 213, 225, 0.75)");
+        normalGrad.addColorStop(1, "rgba(203, 213, 225, 0.35)");
+        ctx.strokeStyle = normalGrad;
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, endX, endY);
+        ctx.stroke();
       }
+      ctx.restore();
     }
 
     // 1. 淡化处理的雷达同心圆导引轨道与简化十字线
@@ -991,7 +1177,6 @@
       const n = (currentRoot.children || []).length;
       ctx.save();
 
-      // 微弱环境散焦光晕
       const grad = ctx.createRadialGradient(cx, cy, 10, cx, cy, 200);
       grad.addColorStop(0, "rgba(240, 247, 255, 0.7)");
       grad.addColorStop(1, "rgba(248, 250, 252, 0)");
@@ -1000,21 +1185,15 @@
       ctx.arc(cx, cy, 200, 0, Math.PI * 2);
       ctx.fill();
 
-      // 0.75px 细线条 + rgba(203, 213, 225, 0.4) 低透明度虚线
       ctx.strokeStyle = STYLE.orbitLine;
       ctx.lineWidth = 0.8;
       ctx.setLineDash([4, 8]);
 
-      let r1, r2;
+      let r1 = 220, r2 = 360;
       if (n <= 4) {
-        r1 = Math.min(canvas.width, canvas.height) * 0.22;
-        r2 = Math.min(canvas.width, canvas.height) * 0.36;
+        r1 = 180; r2 = 290;
       } else if (n <= 8) {
-        r1 = Math.min(canvas.width, canvas.height) * 0.26;
-        r2 = Math.min(canvas.width, canvas.height) * 0.40;
-      } else {
-        r1 = Math.min(canvas.width, canvas.height) * 0.23;
-        r2 = Math.min(canvas.width, canvas.height) * 0.38;
+        r1 = 220; r2 = 340;
       }
 
       ctx.beginPath();
@@ -1026,7 +1205,6 @@
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // 极淡化简化的微型中心十字，彻底去除生硬度数标注抢焦点
       const cl = 20;
       ctx.strokeStyle = STYLE.crosshair;
       ctx.lineWidth = 0.8;
@@ -1038,8 +1216,8 @@
       ctx.restore();
     }
 
-    // 二级外推防叠
-    function calculateL2Nodes(parentNode) {
+    // 二级外推防叠 (仅星轨雷达模式使用)
+    function calculateL2NodesOrbit(parentNode) {
       const children = parentNode.item.children || [];
       const m = children.length;
       if (m === 0) return [];
@@ -1059,63 +1237,47 @@
           : parentAngle - (coneSpan / 2) + (coneSpan * j) / (m - 1);
 
         const dist = (m >= 4) ? (j % 2 === 0 ? rInner : rOuter) : 175;
-
-        const lx = Math.round(px + dist * Math.cos(subAngle));
-        const ly = Math.round(py + dist * Math.sin(subAngle));
+        const dims = measureNodeDimensions(children[j], 2);
 
         result.push({
           item: children[j],
           level: 2,
-          x: lx,
-          y: ly,
+          x: Math.round(px + dist * Math.cos(subAngle)),
+          y: Math.round(py + dist * Math.sin(subAngle)),
           angle: subAngle,
-          w: STYLE.cardL2.w,
-          h: STYLE.cardL2.h,
+          w: dims.w,
+          h: dims.h,
+          badgeW: dims.badgeW,
+          iconSize: dims.iconSize,
           parent: parentNode
         });
       }
 
-      const l2W = STYLE.cardL2.w;
-      const l2H = STYLE.cardL2.h;
       for (let step = 0; step < 4; step++) {
         for (let i = 0; i < result.length; i++) {
           for (let j = i + 1; j < result.length; j++) {
-            const n1 = result[i];
-            const n2 = result[j];
-            const dx = n2.x - n1.x;
-            const dy = n2.y - n1.y;
-            const minDx = l2W + 10;
-            const minDy = l2H + 6;
+            const n1 = result[i], n2 = result[j];
+            const dx = n2.x - n1.x, dy = n2.y - n1.y;
+            const minDx = (n1.w + n2.w) / 2 + 10;
+            const minDy = (n1.h + n2.h) / 2 + 6;
             const overlapX = minDx - Math.abs(dx);
             const overlapY = minDy - Math.abs(dy);
             if (overlapX > 0 && overlapY > 0) {
               if (overlapX < overlapY) {
-                const shift = Math.round(overlapX * 0.55);
-                const sgn = dx >= 0 ? 1 : -1;
-                n2.x += shift * sgn;
-                n1.x -= shift * sgn;
+                const shift = Math.round(overlapX * 0.55) * (dx >= 0 ? 1 : -1);
+                n2.x += shift; n1.x -= shift;
               } else {
-                const shift = Math.round(overlapY * 0.55);
-                const sgn = dy >= 0 ? 1 : -1;
-                n2.y += shift * sgn;
-                n1.y -= shift * sgn;
+                const shift = Math.round(overlapY * 0.55) * (dy >= 0 ? 1 : -1);
+                n2.y += shift; n1.y -= shift;
               }
             }
           }
-        }
-        const padX = l2W / 2 + 12;
-        const padYMin = 66 + l2H / 2;
-        const padYMax = canvas.height - l2H / 2 - 12;
-        for (const child of result) {
-          child.x = Math.max(padX, Math.min(canvas.width - padX, child.x));
-          child.y = Math.max(padYMin, Math.min(padYMax, child.y));
         }
       }
 
       return result;
     }
 
-    // 计算卡片边界点并留出 5px 的呼吸内衬间距 (Padding，避免硬连到文字边缘)
     function getCardBoundaryPoint(cx, cy, w, h, targetX, targetY, padding = 5) {
       const dx = targetX - cx;
       const dy = targetY - cy;
@@ -1138,9 +1300,8 @@
       };
     }
 
-    // 绘制高阶三阶贝塞尔平滑流线 (Cubic Bezier: 切线发散引导、线性渐变淡出、关联高亮与非关联智能虚化)
+    // 绘制高阶三阶贝塞尔平滑流线 (用于星轨雷达模式)
     function drawCubicBezierConnection(parentBox, childBox, parentAngle, childAngle, level, isHovered, isActive, isDimmed) {
-      // 1. 获取两端留出 4~6px padding 的端点，绝不硬连到文字或卡片边框边缘
       const p1 = getCardBoundaryPoint(parentBox.x, parentBox.y, parentBox.w, parentBox.h, childBox.x, childBox.y, 5);
       const p2 = getCardBoundaryPoint(childBox.x, childBox.y, childBox.w, childBox.h, parentBox.x, parentBox.y, 5);
 
@@ -1149,12 +1310,10 @@
       const dist = Math.hypot(x2 - x1, y2 - y1);
       if (dist < 4) return;
 
-      // 2. 控制起点和终点的切线方向，让曲线从父节点平滑发散进入子节点，消除尖锐硬折角与网状直插感
       let cp1x, cp1y, cp2x, cp2y;
       if (level === 1) {
         const rayAngle = Math.atan2(childBox.y - parentBox.y, childBox.x - parentBox.x);
         const tangentLen = dist * 0.40;
-        // 向外微弯的弧线
         const curveOffset = Math.sin(rayAngle * 2) * (dist * 0.05);
         const perpX = -Math.sin(rayAngle) * curveOffset;
         const perpY = Math.cos(rayAngle) * curveOffset;
@@ -1175,10 +1334,7 @@
       }
 
       ctx.save();
-
       if (isHovered || isActive) {
-        // 激活/悬停高亮微光效 (stroke-width: 1.5px，发光色 rgba(59, 130, 246, 0.85))
-        // 1. 发光外晕层
         ctx.strokeStyle = "rgba(59, 130, 246, 0.20)";
         ctx.lineWidth = 4.5;
         ctx.beginPath();
@@ -1186,7 +1342,6 @@
         ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
         ctx.stroke();
 
-        // 2. 核心 1.5px 极精发光线条
         const activeGrad = ctx.createLinearGradient(x1, y1, x2, y2);
         activeGrad.addColorStop(0, "rgba(59, 130, 246, 0.95)");
         activeGrad.addColorStop(1, "rgba(96, 165, 250, 0.80)");
@@ -1197,33 +1352,23 @@
         ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
         ctx.stroke();
 
-        // 3. 沿三阶贝塞尔平滑流动的微光粒子
         const t = (Date.now() % 1600) / 1600;
         const u = 1 - t;
         const orbX = u*u*u*x1 + 3*u*u*t*cp1x + 3*u*t*t*cp2x + t*t*t*x2;
-        const orbY = u*u*u*y1 + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*y2;
+        const orbY = u*u*u*startY + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*endY;
 
         ctx.fillStyle = "#3b82f6";
         ctx.beginPath();
         ctx.arc(orbX, orbY, 2.2, 0, Math.PI * 2);
         ctx.fill();
-
-        ctx.fillStyle = "rgba(59, 130, 246, 0.25)";
-        ctx.beginPath();
-        ctx.arc(orbX, orbY, 5.0, 0, Math.PI * 2);
-        ctx.fill();
-
       } else if (isDimmed) {
-        // 其余非关联连线进一步虚化 (opacity: 0.15, 0.75px 极细微透明)
         ctx.strokeStyle = "rgba(203, 213, 225, 0.15)";
         ctx.lineWidth = 0.75;
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
         ctx.stroke();
-
       } else {
-        // 普通连接线：降低粗细为 1px，起点透明度约 0.6，沿途渐变淡化至子节点处约 0.2
         const normalGrad = ctx.createLinearGradient(x1, y1, x2, y2);
         normalGrad.addColorStop(0, "rgba(203, 213, 225, 0.60)");
         normalGrad.addColorStop(1, "rgba(203, 213, 225, 0.20)");
@@ -1235,13 +1380,12 @@
         ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
         ctx.stroke();
       }
-
       ctx.restore();
     }
 
-    // 绘制现代精工卡片 (Card Nodes: 12-14px圆角, 半透明微边框, 现代弥散柔和多层阴影, translateY悬停上浮)
+    // 绘制现代精工卡片 (Card Nodes: 零截断，全称直显，自适应动态宽度)
     function drawModernCardNode(node, level, isHovered, isActive) {
-      const { x, y, w, h, item } = node;
+      const { x, y, w, h, item, badgeW: presetBadgeW, iconSize: presetIconSize } = node;
       const cfg = (level === 1) ? STYLE.cardL1 : STYLE.cardL2;
       const theme = getItemTheme(item);
 
@@ -1252,7 +1396,7 @@
       anim.hoverT += (targetT - anim.hoverT) * 0.16;
       nodeAnimState.set(key, anim);
 
-      // 悬停上浮 translateY(-2px)
+      // 悬停上浮 translateY(-2.5px)
       const liftY = anim.hoverT * -2.5;
       const currentY = y + liftY;
 
@@ -1263,7 +1407,7 @@
 
       ctx.save();
 
-      // 现代弥散柔和多层阴影 (0 4px 20px -2px rgba(0,0,0,0.05), 0 2px 6px -1px rgba(0,0,0,0.02))
+      // 现代弥散柔和多层阴影
       if (anim.hoverT > 0.05) {
         ctx.shadowColor = `rgba(59, 130, 246, ${0.12 * anim.hoverT})`;
         ctx.shadowBlur = 18 + 8 * anim.hoverT;
@@ -1276,13 +1420,13 @@
         ctx.shadowOffsetY = 3;
       }
 
-      // 卡片底色 (白底微弱玻璃拟态 backdrop-filter)
+      // 卡片底色
       ctx.fillStyle = cfg.bg;
       ctx.beginPath();
       ctx.roundRect(x1, y1, w, h, cfg.radius);
       ctx.fill();
 
-      // 半透明微边框 (border: 1px solid rgba(226, 232, 240, 0.8))
+      // 半透明微边框
       ctx.shadowColor = "transparent";
       ctx.shadowBlur = 0;
       ctx.shadowOffsetX = 0;
@@ -1297,8 +1441,8 @@
       }
       ctx.stroke();
 
-      // 1. 左侧轻量矢量图标容器 (Lucide 风格矢量图标)
-      const iconSize = (level === 1) ? 26 : 22;
+      // 1. 左侧轻量矢量图标容器
+      const iconSize = presetIconSize || (level === 1 ? 26 : 22);
       const iconX = x1 + 10;
       const iconY = currentY - iconSize / 2;
 
@@ -1309,27 +1453,27 @@
 
       drawLucideVectorIcon(ctx, theme.type, iconX + iconSize / 2, iconY + iconSize / 2, 14, theme.stroke);
 
-      // 2. 右侧数量/格式小标签 (bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-xs)
-      let badgeWidth = 0;
+      // 2. 右侧数量/格式小标签
+      let badgeWidth = presetBadgeW || 0;
       if (item.isDir) {
         const count = (item.count !== undefined) ? item.count : (item.children ? item.children.length : 0);
         if (count > 0) {
           const countStr = String(count);
           const badgeH = 17;
-          badgeWidth = Math.max(22, countStr.length * 6.5 + 12);
+          badgeWidth = badgeWidth || Math.max(22, countStr.length * 6.5 + 12);
           const badgeX = x2 - 9 - badgeWidth;
           const badgeY = currentY - badgeH / 2;
 
-          ctx.fillStyle = "#f1f5f9"; // bg-slate-100
+          ctx.fillStyle = "#f1f5f9";
           ctx.strokeStyle = "rgba(226, 232, 240, 0.75)";
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.roundRect(badgeX, badgeY, badgeWidth, badgeH, 999); // rounded-full
+          ctx.roundRect(badgeX, badgeY, badgeWidth, badgeH, 999);
           ctx.fill();
           ctx.stroke();
 
           ctx.font = "600 9.5px 'SF Pro Text', -apple-system, sans-serif";
-          ctx.fillStyle = "#64748b"; // text-slate-500
+          ctx.fillStyle = "#64748b";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(countStr, badgeX + badgeWidth / 2, currentY + 0.5);
@@ -1337,73 +1481,44 @@
       } else {
         const fmtStr = theme.tag;
         const badgeH = 15;
-        badgeWidth = Math.max(34, fmtStr.length * 5.5 + 10);
+        badgeWidth = badgeWidth || Math.max(34, fmtStr.length * 5.5 + 10);
         const badgeX = x2 - 9 - badgeWidth;
         const badgeY = currentY - badgeH / 2;
 
-        ctx.fillStyle = "rgba(241, 245, 249, 0.85)"; // bg-slate-100
+        ctx.fillStyle = "rgba(241, 245, 249, 0.85)";
         ctx.strokeStyle = "rgba(226, 232, 240, 0.75)";
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.roundRect(badgeX, badgeY, badgeWidth, badgeH, 999); // rounded-full
+        ctx.roundRect(badgeX, badgeY, badgeWidth, badgeH, 999);
         ctx.fill();
         ctx.stroke();
 
         ctx.font = "700 8px 'SF Pro Text', -apple-system, sans-serif";
-        ctx.fillStyle = "#64748b"; // text-slate-500
+        ctx.fillStyle = "#64748b";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(fmtStr, badgeX + badgeWidth / 2, currentY + 0.5);
       }
 
-      // 3. 中间文件名自适应排版 (保留扩展名)
+      // 3. 中间文件名：100% 完整直接呈现，杜绝截断与省略号
       const textStartX = iconX + iconSize + 9;
-      const textMaxW = w - (iconSize + 22) - (badgeWidth > 0 ? (badgeWidth + 10) : 10);
-
       ctx.font = (level === 1 ? "500 12px " : "500 11px ") + "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif";
       ctx.fillStyle = (isHovered || isActive) ? cfg.textColorHover : cfg.textColor;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
-      let rawName = item.name;
-      let isTruncated = false;
-      let dispName = rawName;
-
-      if (ctx.measureText(rawName).width > textMaxW) {
-        isTruncated = true;
-        const dotIndex = rawName.lastIndexOf(".");
-        if (!item.isDir && dotIndex > 0 && rawName.length - dotIndex <= 7) {
-          const ext = rawName.slice(dotIndex);
-          let stem = rawName.slice(0, dotIndex);
-          const fixedW = ctx.measureText(".." + ext).width;
-          if (fixedW < textMaxW) {
-            while (stem.length > 1 && ctx.measureText(stem + ".." + ext).width > textMaxW) {
-              stem = stem.slice(0, -1);
-            }
-            dispName = stem + ".." + ext;
-          } else {
-            while (dispName.length > 2 && ctx.measureText(dispName + "..").width > textMaxW) {
-              dispName = dispName.slice(0, -1);
-            }
-            dispName += "..";
-          }
-        } else {
-          while (dispName.length > 2 && ctx.measureText(dispName + "..").width > textMaxW) {
-            dispName = dispName.slice(0, -1);
-          }
-          dispName += "..";
-        }
-      }
-      node.isTruncated = isTruncated;
-      ctx.fillText(dispName, textStartX, currentY + 0.5);
+      const rawName = item.name;
+      node.isTruncated = false;
+      ctx.fillText(rawName, textStartX, currentY + 0.5);
 
       ctx.restore();
     }
 
-    // 绘制当前工作区高亮卡片 (Active/Current Workspace: 无四周生硬粗蓝框，改用微发光+渐变微边框+精致Badge)
-    function drawActiveWorkspaceCard(cx, cy) {
+    // 绘制当前工作区高亮卡片 (Active/Current Workspace: 全称直显，自适应动态宽度)
+    function drawActiveWorkspaceCard(cx, cy, customW, customH) {
       const cfg = STYLE.center;
-      const w = cfg.w, h = cfg.h;
+      const w = customW || cfg.w;
+      const h = customH || cfg.h;
       cx = Math.round(cx);
       cy = Math.round(cy);
       const x1 = cx - Math.round(w / 2);
@@ -1411,7 +1526,7 @@
 
       ctx.save();
 
-      // 1. 柔和蓝色光晕阴影 (box-shadow: 0 0 24px -4px rgba(59, 130, 246, 0.22))
+      // 1. 柔和蓝色光晕阴影
       ctx.shadowColor = cfg.shadowGlow;
       ctx.shadowBlur = 24;
       ctx.shadowOffsetX = 0;
@@ -1422,24 +1537,22 @@
       ctx.roundRect(x1, y1, w, h, cfg.radius);
       ctx.fill();
 
-      // 第二层方向弥散底影
       ctx.shadowColor = cfg.shadowSoft;
       ctx.shadowBlur = 12;
       ctx.shadowOffsetY = 4;
       ctx.fill();
 
-      // 清空阴影绘制边框
       ctx.shadowColor = "transparent";
       ctx.shadowBlur = 0;
       ctx.shadowOffsetX = 0;
       ctx.shadowOffsetY = 0;
 
-      // 2. 渐变蓝微边框 (border: 1px solid rgba(59, 130, 246, 0.4))
+      // 2. 渐变蓝微边框
       ctx.strokeStyle = cfg.border;
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // 3. 顶部微发光 border (Linear 标志性顶部微发光细线)
+      // 3. 顶部微发光 border
       const topGrad = ctx.createLinearGradient(x1 + 20, y1 + 1, x1 + w - 20, y1 + 1);
       topGrad.addColorStop(0, "rgba(59, 130, 246, 0.1)");
       topGrad.addColorStop(0.5, "rgba(96, 165, 250, 0.75)");
@@ -1465,7 +1578,7 @@
 
       drawLucideVectorIcon(ctx, "folder", bx1 + badgeSize / 2, cy, 18, "#2563eb");
 
-      // 5. 右侧信息层级：CURRENT WORKSPACE 胶囊小字号 (font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b;)
+      // 5. 右侧信息层级：全称直显，不作截断
       const infoX = bx1 + badgeSize + 12;
       ctx.font = "600 9.5px 'SF Pro Text', -apple-system, sans-serif";
       ctx.fillStyle = "#64748b";
@@ -1476,8 +1589,7 @@
 
       ctx.font = "600 13.5px -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif";
       ctx.fillStyle = "#0f172a";
-      let title = currentRoot.name;
-      if (title.length > 15) title = title.slice(0, 13) + "..";
+      const title = currentRoot.name || "工作区根目录";
       ctx.fillText(title, infoX, cy + 2);
 
       const count = (currentRoot.children || []).length;
@@ -1486,64 +1598,230 @@
       const statusText = pathHistory.length > 0 ? `${count} 个直属分支 · 单击返回` : `${count} 个直属分支 · 工作区根目录`;
       ctx.fillText(statusText, infoX, cy + 17);
 
-      renderedNodes.push({
-        item: currentRoot,
-        level: 0,
-        x: cx,
-        y: cy,
-        w,
-        h,
-        isCenter: true
-      });
-
       ctx.restore();
     }
 
-    // 全息浮窗
-    function drawHoverTooltip(node) {
+    let renderedNodes = [];
+
+    // 主渲染引擎 (统一接入虚拟摄像机、全称直显与多种布局模式)
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      renderedNodes = [];
+
       ctx.save();
-      const text = node.item.name;
-      ctx.font = "500 11.5px -apple-system, BlinkMacSystemFont, sans-serif";
-      const textW = ctx.measureText(text).width + 24;
-      const tw = Math.min(Math.max(textW, 110), 480);
-      const th = 28;
-      let tx1 = Math.max(10, Math.min(canvas.width - tw - 10, node.x - tw / 2));
-      let ty1 = Math.max(10, node.y - node.h / 2 - th - 8);
+      // 应用虚拟摄像机平移与缩放矩阵
+      ctx.translate(camera.x, camera.y);
+      ctx.scale(camera.zoom, camera.zoom);
 
-      ctx.shadowColor = "rgba(0, 0, 0, 0.12)";
-      ctx.shadowBlur = 12;
-      ctx.shadowOffsetY = 4;
+      const hoveredItem = hoveredNode ? hoveredNode.item : null;
+      const isAnyHovered = !!hoveredItem;
 
-      ctx.fillStyle = "rgba(15, 23, 42, 0.95)";
-      ctx.beginPath();
-      ctx.roundRect(tx1, ty1, tw, th, 8);
-      ctx.fill();
+      if (currentLayoutMode === 'tree' || currentLayoutMode === 'bilateral') {
+        // === 脑图模式 / 双向脑图模式 ===
+        const layout = calculateMindMapLayout(currentRoot, activeL1Node, currentLayoutMode);
+        const { rootNode, l1Nodes, l2Nodes } = layout;
 
-      ctx.shadowColor = "transparent";
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
+        // 1. 连线层 (层级严格置于卡片下层)
+        for (const node of l1Nodes) {
+          const isHovered = (hoveredItem === node.item);
+          const isActive = (activeL1Node === node.item);
+          let isDimmed = false;
+          if (isAnyHovered) {
+            const isParentOfHovered = (activeL1Node === node.item) && l2Nodes.some(c => c.item === hoveredItem);
+            if (!isHovered && !isParentOfHovered) isDimmed = true;
+          }
+          drawTreeBranchConnection(rootNode, node, isHovered, isActive, isDimmed);
+        }
 
-      ctx.fillStyle = "#ffffff";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, tx1 + tw / 2, ty1 + th / 2);
+        for (const child of l2Nodes) {
+          const isHovered = (hoveredItem === child.item);
+          let isDimmed = false;
+          if (isAnyHovered && !isHovered) isDimmed = true;
+          drawTreeBranchConnection(child.parent, child, isHovered, false, isDimmed);
+        }
+
+        // 2. 绘制二级节点卡片
+        for (const child of l2Nodes) {
+          const isHovered = (hoveredNode && hoveredNode.item === child.item);
+          drawModernCardNode(child, 2, isHovered, false);
+          renderedNodes.push(child);
+        }
+
+        // 3. 绘制一级节点卡片
+        for (const node of l1Nodes) {
+          const isHovered = (hoveredNode && hoveredNode.item === node.item);
+          const isActive = (activeL1Node === node.item);
+          drawModernCardNode(node, 1, isHovered, isActive);
+          renderedNodes.push(node);
+        }
+
+        // 4. 绘制中心根工作区节点
+        drawActiveWorkspaceCard(rootNode.x, rootNode.y, rootNode.w, rootNode.h);
+        renderedNodes.push(rootNode);
+
+      } else {
+        // === 经典星轨雷达模式 ===
+        const cx = 0, cy = 0;
+        drawFaintOrbitGuides(cx, cy);
+
+        const items = currentRoot.children || [];
+        const n = items.length;
+        let rxBase = (n <= 4) ? 220 : ((n <= 8) ? 275 : 360);
+        let ryBase = (n <= 4) ? 150 : ((n <= 8) ? 185 : 240);
+        const rxInner = 240, ryInner = 160, rxOuter = 370, ryOuter = 250;
+
+        const l1Calculated = [];
+        for (let i = 0; i < n; i++) {
+          const item = items[i];
+          const dims = measureNodeDimensions(item, 1);
+          const angle = -Math.PI / 2 + (2 * Math.PI * i) / n;
+          const curRx = (n > 8) ? (i % 2 === 0 ? rxInner : rxOuter) : rxBase;
+          const curRy = (n > 8) ? (i % 2 === 0 ? ryInner : ryOuter) : ryBase;
+
+          l1Calculated.push({
+            item,
+            level: 1,
+            x: Math.round(cx + curRx * Math.cos(angle)),
+            y: Math.round(cy + curRy * Math.sin(angle)),
+            angle,
+            w: dims.w,
+            h: dims.h,
+            badgeW: dims.badgeW,
+            iconSize: dims.iconSize
+          });
+        }
+
+        // 物理松弛防叠
+        for (let step = 0; step < 6; step++) {
+          for (let i = 0; i < l1Calculated.length; i++) {
+            for (let j = i + 1; j < l1Calculated.length; j++) {
+              const n1 = l1Calculated[i], n2 = l1Calculated[j];
+              const dx = n2.x - n1.x, dy = n2.y - n1.y;
+              const minDx = (n1.w + n2.w) / 2 + 14;
+              const minDy = (n1.h + n2.h) / 2 + 10;
+              const overlapX = minDx - Math.abs(dx);
+              const overlapY = minDy - Math.abs(dy);
+              if (overlapX > 0 && overlapY > 0) {
+                if (overlapX < overlapY) {
+                  const shift = Math.round(overlapX * 0.55) * (dx >= 0 ? 1 : -1);
+                  n2.x += shift; n1.x -= shift;
+                } else {
+                  const shift = Math.round(overlapY * 0.55) * (dy >= 0 ? 1 : -1);
+                  n2.y += shift; n1.y -= shift;
+                }
+              }
+            }
+          }
+        }
+
+        let l2Calculated = [];
+        const activeNodeObj = l1Calculated.find(n => n.item === activeL1Node);
+        if (activeNodeObj && activeNodeObj.item.children) {
+          l2Calculated = calculateL2NodesOrbit(activeNodeObj);
+        }
+
+        const rootDims = measureNodeDimensions(currentRoot, 0);
+        for (const node of l1Calculated) {
+          const isHovered = (hoveredItem === node.item);
+          const isActive = (activeL1Node === node.item);
+          let isDimmed = false;
+          if (isAnyHovered) {
+            const isParentOfHovered = activeNodeObj && activeNodeObj.item === node.item && l2Calculated.some(c => c.item === hoveredItem);
+            if (!isHovered && !isParentOfHovered) isDimmed = true;
+          }
+          drawCubicBezierConnection(
+            { x: cx, y: cy, w: rootDims.w, h: rootDims.h },
+            { x: node.x, y: node.y, w: node.w, h: node.h },
+            null, node.angle, 1, isHovered, isActive, isDimmed
+          );
+        }
+
+        if (activeNodeObj) {
+          for (const child of l2Calculated) {
+            const isHovered = (hoveredItem === child.item);
+            let isDimmed = false;
+            if (isAnyHovered && !isHovered) isDimmed = true;
+            drawCubicBezierConnection(
+              { x: activeNodeObj.x, y: activeNodeObj.y, w: activeNodeObj.w, h: activeNodeObj.h },
+              { x: child.x, y: child.y, w: child.w, h: child.h },
+              activeNodeObj.angle, child.angle, 2, isHovered, false, isDimmed
+            );
+          }
+        }
+
+        for (const child of l2Calculated) {
+          const isHovered = (hoveredNode && hoveredNode.item === child.item);
+          drawModernCardNode(child, 2, isHovered, false);
+          renderedNodes.push(child);
+        }
+        for (const node of l1Calculated) {
+          const isHovered = (hoveredNode && hoveredNode.item === node.item);
+          const isActive = (activeL1Node === node.item);
+          drawModernCardNode(node, 1, isHovered, isActive);
+          renderedNodes.push(node);
+        }
+
+        drawActiveWorkspaceCard(cx, cy, rootDims.w, rootDims.h);
+        renderedNodes.push({ item: currentRoot, level: 0, x: cx, y: cy, w: rootDims.w, h: rootDims.h, isCenter: true });
+      }
+
       ctx.restore();
     }
 
-    // 鼠标交互
-    canvas.addEventListener("mousemove", (e) => {
+    // 坐标拾取 (屏幕坐标与摄像机世界坐标变换)
+    function getHitNode(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
+      const sx = clientX - rect.left;
+      const sy = clientY - rect.top;
+      const wx = (sx - camera.x) / camera.zoom;
+      const wy = (sy - camera.y) / camera.zoom;
 
-      let hit = null;
-      for (const n of renderedNodes) {
-        if (Math.abs(mx - n.x) <= n.w / 2 && Math.abs(my - n.y) <= n.h / 2) {
-          hit = n;
-          break;
+      for (let i = renderedNodes.length - 1; i >= 0; i--) {
+        const n = renderedNodes[i];
+        if (Math.abs(wx - n.x) <= n.w / 2 && Math.abs(wy - n.y) <= n.h / 2) {
+          return n;
         }
       }
+      return null;
+    }
+
+    // 鼠标画布按住拖拽平移
+    canvas.addEventListener("mousedown", (e) => {
+      const hit = getHitNode(e.clientX, e.clientY);
+      if (!hit || e.button === 1 || e.button === 2) {
+        isDraggingCanvas = true;
+        hasDragged = false;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        cameraDragStart = { x: camera.x, y: camera.y };
+        canvas.style.cursor = "grabbing";
+      }
+    });
+
+    window.addEventListener("mouseup", (e) => {
+      if (isDraggingCanvas) {
+        isDraggingCanvas = false;
+        const hit = getHitNode(e.clientX, e.clientY);
+        canvas.style.cursor = hit ? "pointer" : "default";
+      }
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (isDraggingCanvas) {
+        const dx = e.clientX - dragStartX;
+        const dy = e.clientY - dragStartY;
+        if (Math.hypot(dx, dy) > 4) {
+          hasDragged = true;
+        }
+        camera.x = cameraDragStart.x + dx;
+        camera.y = cameraDragStart.y + dy;
+        canvas.style.cursor = "grabbing";
+        render();
+        return;
+      }
+
+      const hit = getHitNode(e.clientX, e.clientY);
+      canvas.style.cursor = hit ? "pointer" : "default";
 
       let needRedraw = false;
       if (hit !== hoveredNode) {
@@ -1568,7 +1846,62 @@
       if (needRedraw) render();
     });
 
-    // 动态按需加载目录内容（支持任意层级下钻，彻底解决深层目录与文档不显示的问题）
+    // 鼠标滚轮滑动与缩放
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (e.ctrlKey) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = e.clientX - rect.left;
+        const sy = e.clientY - rect.top;
+        const wx = (sx - camera.x) / camera.zoom;
+        const wy = (sy - camera.y) / camera.zoom;
+
+        const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;
+        const newZoom = Math.max(0.35, Math.min(2.5, camera.zoom * zoomFactor));
+        camera.zoom = newZoom;
+        camera.x = sx - wx * camera.zoom;
+        camera.y = sy - wy * camera.zoom;
+      } else {
+        camera.y -= e.deltaY * 0.85;
+        camera.x -= (e.deltaX || 0) * 0.85;
+      }
+      render();
+    }, { passive: false });
+
+    // 单击事件：深入展开或提示
+    canvas.addEventListener("click", async (e) => {
+      if (hasDragged) {
+        hasDragged = false;
+        return;
+      }
+      const hit = getHitNode(e.clientX, e.clientY);
+      if (!hit) return;
+
+      if (hit.isCenter) {
+        await navigateBack();
+        return;
+      }
+
+      if (hit.item.isDir) {
+        beep(1100, 0.06);
+        pathHistory.push(currentRoot);
+        const nextRoot = hit.item;
+        await ensureNodeChildrenLoaded(nextRoot);
+        currentRoot = nextRoot;
+        activeL1Node = (currentRoot.children || []).find(c => c.isDir && (c.count > 0 || (c.children && c.children.length > 0))) || null;
+        if (activeL1Node && activeL1Node.handle && !activeL1Node.loaded) {
+          await ensureNodeChildrenLoaded(activeL1Node);
+        }
+        hoveredNode = null;
+        updateBreadcrumbs();
+        resetView();
+      } else {
+        beep(450, 0.04);
+        showToast(`💡 双击「${hit.item.name}」可直接唤起预览 / 本地查看`);
+      }
+    });
+
+    // 动态按需加载目录内容
     async function ensureNodeChildrenLoaded(node) {
       if (!node || !node.isDir) return [];
       if (!node.handle) {
@@ -1598,7 +1931,6 @@
             });
           }
         }
-        // 快速统计子文件夹内项数
         for (const f of folders) {
           try {
             let cnt = 0;
@@ -1620,33 +1952,6 @@
       }
       return node.children || [];
     }
-
-    canvas.addEventListener("click", async (e) => {
-      if (!hoveredNode) return;
-
-      if (hoveredNode.isCenter) {
-        await navigateBack();
-        return;
-      }
-
-      if (hoveredNode.item.isDir) {
-        beep(1100, 0.06);
-        pathHistory.push(currentRoot);
-        const nextRoot = hoveredNode.item;
-        await ensureNodeChildrenLoaded(nextRoot);
-        currentRoot = nextRoot;
-        activeL1Node = (currentRoot.children || []).find(c => c.isDir && (c.count > 0 || (c.children && c.children.length > 0))) || null;
-        if (activeL1Node && activeL1Node.handle && !activeL1Node.loaded) {
-          await ensureNodeChildrenLoaded(activeL1Node);
-        }
-        hoveredNode = null;
-        updateBreadcrumbs();
-        render();
-      } else {
-        beep(450, 0.04);
-        showToast(`💡 双击「${hoveredNode.item.name}」可直接唤起预览 / 本地查看`);
-      }
-    });
 
     // Toast 浮动提示
     let toastTimer = null;
@@ -1807,10 +2112,11 @@
     }
 
     canvas.addEventListener("dblclick", async (e) => {
-      if (!hoveredNode) return;
-      if (hoveredNode.item.isDir) {
+      const hit = getHitNode(e.clientX, e.clientY);
+      if (!hit) return;
+      if (hit.item.isDir) {
         pathHistory.push(currentRoot);
-        const nextRoot = hoveredNode.item;
+        const nextRoot = hit.item;
         await ensureNodeChildrenLoaded(nextRoot);
         currentRoot = nextRoot;
         activeL1Node = (currentRoot.children || []).find(c => c.isDir && (c.count > 0 || (c.children && c.children.length > 0))) || null;
@@ -1819,11 +2125,11 @@
         }
         hoveredNode = null;
         updateBreadcrumbs();
-        render();
+        resetView();
         return;
       }
       beep(1200, 0.05);
-      await openOrPreviewFile(hoveredNode.item);
+      await openOrPreviewFile(hit.item);
     });
 
     async function navigateBack() {
@@ -1836,7 +2142,7 @@
         }
         hoveredNode = null;
         updateBreadcrumbs();
-        render();
+        resetView();
       }
     }
 
@@ -1857,7 +2163,7 @@
       activeL1Node = currentRoot.children.find(c => c.isDir && c.children && c.children.length > 0) || null;
       this.innerHTML = `<span>🔄</span> ${target.name} [点击切换]`;
       updateBreadcrumbs();
-      render();
+      resetView();
     });
 
     // 打开本地真实文件夹
@@ -1889,7 +2195,7 @@
         }
 
         updateBreadcrumbs();
-        render();
+        resetView();
       } catch (err) {
         if (err.name !== "AbortError") {
           console.error("读取目录失败:", err);
@@ -1908,6 +2214,32 @@
       render();
       requestAnimationFrame(loop);
     }
+
+    // 布局模式切换监听器
+    const btnLayoutTree = document.getElementById("btnLayoutTree");
+    const btnLayoutBilateral = document.getElementById("btnLayoutBilateral");
+    const btnLayoutOrbit = document.getElementById("btnLayoutOrbit");
+    const btnResetView = document.getElementById("btnResetView");
+
+    function setLayoutMode(mode) {
+      currentLayoutMode = mode;
+      [btnLayoutTree, btnLayoutBilateral, btnLayoutOrbit].forEach(b => {
+        if (b) b.classList.remove("active");
+      });
+      if (mode === "tree" && btnLayoutTree) btnLayoutTree.classList.add("active");
+      else if (mode === "bilateral" && btnLayoutBilateral) btnLayoutBilateral.classList.add("active");
+      else if (mode === "orbit" && btnLayoutOrbit) btnLayoutOrbit.classList.add("active");
+      beep(720, 0.04);
+      resetView();
+    }
+
+    if (btnLayoutTree) btnLayoutTree.addEventListener("click", () => setLayoutMode("tree"));
+    if (btnLayoutBilateral) btnLayoutBilateral.addEventListener("click", () => setLayoutMode("bilateral"));
+    if (btnLayoutOrbit) btnLayoutOrbit.addEventListener("click", () => setLayoutMode("orbit"));
+    if (btnResetView) btnResetView.addEventListener("click", () => {
+      beep(800, 0.04);
+      resetView();
+    });
 
     updateBreadcrumbs();
     resize();

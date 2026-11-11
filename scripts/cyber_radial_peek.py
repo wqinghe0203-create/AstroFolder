@@ -140,6 +140,13 @@ class RoundedButton(tk.Canvas):
         if self.command and 0 <= e.x <= self.w and 0 <= e.y <= self.h:
             self.command()
 
+    def set_text(self, new_text):
+        self.text = new_text
+        f = tkfont.Font(family=self.font[0], size=self.font[1], weight=self.font[2] if len(self.font) > 2 else "normal")
+        self.w = f.measure(new_text) + 24
+        self.config(width=self.w)
+        self._draw(self.bg_color, self.fg_color, self.border_color)
+
 
 class RoundedPill(tk.Canvas):
     """现代胶囊指示条与徽章 (Linear / Vercel Rounded Capsule Pill)"""
@@ -185,6 +192,16 @@ class RadialFolderPeekApp:
         self.font_tooltip = tkfont.Font(family="Microsoft YaHei UI", size=8)
 
         # 交互与缓存状态
+        self.layout_mode = "tree"  # "tree" (思维导图模式) | "orbit" (星轨雷达模式)
+        self.camera_x = None
+        self.camera_y = None
+        self.is_panning = False
+        self.has_panned = False
+        self.pan_start_x = 0
+        self.pan_start_y = 0
+        self.pan_cam_x = 0
+        self.pan_cam_y = 0
+
         self.hovered_node = None
         self.active_l1_node = None
         self.nodes_data = {}
@@ -275,6 +292,22 @@ class RadialFolderPeekApp:
         )
         self.btn_open.pack(side=tk.LEFT, padx=3)
 
+        self.btn_layout = RoundedButton(
+            self.top_bar, text="🧠 树状导图", command=self.toggle_layout_mode,
+            bg_color="#ffffff", fg_color="#2563eb", hover_bg="#eff6ff", hover_fg="#1d4ed8",
+            border_color="#bfdbfe", hover_border="#93c5fd", radius=8,
+            font=("Microsoft YaHei UI", 9, "bold"), padx=10, pady=5
+        )
+        self.btn_layout.pack(side=tk.LEFT, padx=3)
+
+        self.btn_reset_view = RoundedButton(
+            self.top_bar, text="🎯 居中", command=self.reset_camera,
+            bg_color="#ffffff", fg_color="#334155", hover_bg="#f8fafc", hover_fg="#0f172a",
+            border_color="#cbd5e1", hover_border="#94a3b8", radius=8,
+            font=("Microsoft YaHei UI", 9), padx=8, pady=5
+        )
+        self.btn_reset_view.pack(side=tk.LEFT, padx=3)
+
         # 分割竖线
         self.sep2 = tk.Frame(self.top_bar, bg="#e2e8f0", width=1, height=22)
         self.sep2.pack(side=tk.LEFT, padx=(8, 8))
@@ -288,7 +321,7 @@ class RadialFolderPeekApp:
 
         # 5. 顶部操作指南 HUD 胶囊 (圆弧胶囊 10px，清晰易读)
         self.hud_frame = RoundedPill(
-            self.top_bar, text="🖱️ 悬停发散  ·  👈 单击进入  ·  👆 双击打开  ·  ⌫ 退格返回",
+            self.top_bar, text="🖱️ 悬停发散  ·  👈 单击进入  ·  👆 双击打开  ·  🖐 拖拽/滚轮平移  ·  ⌫ 返回",
             bg_color="#f8fafc", fg_color="#64748b", border_color="#cbd5e1",
             radius=10, font=("Microsoft YaHei UI", 8), padx=12, pady=4
         )
@@ -306,11 +339,107 @@ class RadialFolderPeekApp:
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Leave>", self._on_canvas_leave)
-        self.canvas.bind("<Button-1>", self._on_single_click)
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_b1_down)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_b1_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_b1_up)
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
+        self.canvas.bind("<B2-Motion>", self._on_pan_move)
+        self.canvas.bind("<ButtonPress-3>", self._on_pan_start)
+        self.canvas.bind("<B3-Motion>", self._on_pan_move)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.root.bind("<Escape>", lambda e: self.root.destroy())
         self.root.bind("<BackSpace>", lambda e: self.navigate_up())
         self.root.bind("<F5>", lambda e: self.render_path(self.current_path))
+
+    def reset_camera(self):
+        w = self.canvas.winfo_width() or 1240
+        h = self.canvas.winfo_height() or 860
+        if self.layout_mode == "tree":
+            self.camera_x = 160
+            self.camera_y = h // 2
+        else:
+            self.camera_x = w // 2
+            self.camera_y = h // 2
+        self.redraw()
+
+    def toggle_layout_mode(self):
+        if self.layout_mode == "tree":
+            self.layout_mode = "orbit"
+            self.btn_layout.set_text("🪐 星轨雷达")
+        else:
+            self.layout_mode = "tree"
+            self.btn_layout.set_text("🧠 树状导图")
+        self.reset_camera()
+
+    def _on_canvas_b1_down(self, event):
+        items_under = self.canvas.find_overlapping(event.x - 2, event.y - 2, event.x + 2, event.y + 2)
+        has_node = False
+        for i_id in items_under:
+            tags = self.canvas.gettags(i_id)
+            for t in tags:
+                if t in self.nodes_data or t == "center":
+                    has_node = True
+                    break
+            if has_node:
+                break
+
+        if not has_node:
+            self.is_panning = True
+            self.has_panned = False
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+            self.pan_cam_x = self.camera_x if self.camera_x is not None else event.x
+            self.pan_cam_y = self.camera_y if self.camera_y is not None else event.y
+            self.canvas.config(cursor="fleur")
+        else:
+            self.is_panning = False
+            self.has_panned = False
+
+    def _on_canvas_b1_drag(self, event):
+        if self.is_panning:
+            dx = event.x - self.pan_start_x
+            dy = event.y - self.pan_start_y
+            if abs(dx) > 3 or abs(dy) > 3:
+                self.has_panned = True
+            self.camera_x = self.pan_cam_x + dx
+            self.camera_y = self.pan_cam_y + dy
+            self.redraw()
+
+    def _on_canvas_b1_up(self, event):
+        if self.is_panning:
+            self.is_panning = False
+            self.canvas.config(cursor="")
+            if self.has_panned:
+                return
+
+        # 点击节点
+        if not self.has_panned:
+            self._on_single_click(event)
+
+    def _on_pan_start(self, event):
+        self.is_panning = True
+        self.has_panned = False
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+        self.pan_cam_x = self.camera_x if self.camera_x is not None else event.x
+        self.pan_cam_y = self.camera_y if self.camera_y is not None else event.y
+        self.canvas.config(cursor="fleur")
+
+    def _on_pan_move(self, event):
+        if self.is_panning:
+            dx = event.x - self.pan_start_x
+            dy = event.y - self.pan_start_y
+            self.camera_x = self.pan_cam_x + dx
+            self.camera_y = self.pan_cam_y + dy
+            self.redraw()
+
+    def _on_mouse_wheel(self, event):
+        delta = event.delta
+        if self.camera_y is None:
+            self.camera_y = self.canvas.winfo_height() // 2
+        self.camera_y += delta
+        self.redraw()
 
     def _update_breadcrumbs(self):
         """生成支持逐级点击跳转的高交互圆角面包屑组件"""
@@ -385,6 +514,7 @@ class RadialFolderPeekApp:
         if parent and parent != self.current_path and os.path.exists(parent):
             self.history_stack.append(self.current_path)
             self.render_path(parent)
+            self.reset_camera()
 
     def render_path(self, path):
         if not os.path.exists(path):
@@ -441,6 +571,140 @@ class RadialFolderPeekApp:
         files.sort(key=lambda x: x["name"].lower())
         return folders + files
 
+
+    def _measure_card_dimensions(self, item, level):
+        """精准测算卡片物理像素宽度，让长文件名100%完整展示，绝不出现省略号截断"""
+        box_h = 44 if level == 1 else 38
+        icon_box_size = 26 if level == 1 else 22
+        _, _, _, type_tag = self._get_item_icon_theme(item)
+
+        badge_w = 0
+        if item["is_dir"]:
+            count = item.get("count", 0)
+            if count > 0:
+                badge_w = max(24, len(str(count)) * 7 + 12)
+        else:
+            badge_w = max(34, len(type_tag) * 6 + 10)
+
+        name_w = self.font_main.measure(item["name"])
+        min_w = 150 if level == 1 else 135
+        # 9 (左边距) + icon_box_size + 8 (间隙) + name_w + (badge_w + 10 if badge_w > 0 else 0) + 12 (右边距)
+        box_w = max(min_w, 9 + icon_box_size + 8 + name_w + (badge_w + 10 if badge_w > 0 else 0) + 12)
+        return box_w, box_h, badge_w, icon_box_size
+
+    def _calculate_mindmap_layout(self, w, h):
+        """思维导图树状布局计算引擎 (Mind Map Strict Vertical Non-Overlap)"""
+        gap_y = 14
+        col_dist = 76
+        folder_name = os.path.basename(self.current_path) or self.current_path
+        root_w = max(204, self.font_main_bold.measure(folder_name) + 90)
+        root_h = 62
+
+        cx = self.camera_x if self.camera_x is not None else 160
+        cy = self.camera_y if self.camera_y is not None else h // 2
+
+        l1_nodes = []
+        total_l1_h = 0
+        for item in self.l1_items:
+            is_expanded = (self.active_l1_node and self.active_l1_node.get("path") == item.get("path"))
+            box_w, box_h, badge_w, ib_size = self._measure_card_dimensions(item, level=1)
+            subtree_h = box_h
+            children_nodes = []
+            if is_expanded:
+                sub_items = self._scan_directory(item["path"])
+                item["children"] = sub_items
+                if sub_items:
+                    total_child_h = 0
+                    for c in sub_items:
+                        cw, ch, c_badge_w, c_ib_size = self._measure_card_dimensions(c, level=2)
+                        children_nodes.append({
+                            "item": c,
+                            "w": cw,
+                            "h": ch,
+                            "badge_w": c_badge_w,
+                            "ib_size": c_ib_size
+                        })
+                        total_child_h += ch
+                    total_child_h += (len(children_nodes) - 1) * gap_y
+                    subtree_h = max(box_h, total_child_h)
+
+            l1_nodes.append({
+                "item": item,
+                "w": box_w,
+                "h": box_h,
+                "badge_w": badge_w,
+                "ib_size": ib_size,
+                "subtree_h": subtree_h,
+                "is_expanded": is_expanded,
+                "children": children_nodes
+            })
+            total_l1_h += subtree_h
+
+        total_l1_h += max(0, len(l1_nodes) - 1) * gap_y
+
+        cur_y = cy - total_l1_h // 2
+        l1_start_x = cx + root_w // 2 + col_dist
+        all_l2 = []
+
+        for n in l1_nodes:
+            item = n["item"]
+            item["level"] = 1
+            node_center_y = cur_y + n["subtree_h"] // 2
+            item["x"] = l1_start_x + n["w"] // 2
+            item["y"] = node_center_y
+            item["w"] = n["w"]
+            item["h"] = n["h"]
+            item["badge_w"] = n["badge_w"]
+            item["ib_size"] = n["ib_size"]
+
+            if n["is_expanded"] and n["children"]:
+                total_child_h = sum(c["h"] for c in n["children"]) + (len(n["children"]) - 1) * gap_y
+                child_cur_y = node_center_y - total_child_h // 2
+                l2_start_x = item["x"] + n["w"] // 2 + col_dist
+                for c_obj in n["children"]:
+                    child = c_obj["item"]
+                    child["level"] = 2
+                    child["x"] = l2_start_x + c_obj["w"] // 2
+                    child["y"] = child_cur_y + c_obj["h"] // 2
+                    child["w"] = c_obj["w"]
+                    child["h"] = c_obj["h"]
+                    child["badge_w"] = c_obj["badge_w"]
+                    child["ib_size"] = c_obj["ib_size"]
+                    child["parent"] = item
+                    all_l2.append(child)
+                    child_cur_y += c_obj["h"] + gap_y
+
+            cur_y += n["subtree_h"] + gap_y
+
+        return all_l2, cx, cy, root_w, root_h
+
+    def _draw_tree_branch(self, p1, p2, is_hovered=False, is_active=False, is_dimmed=False):
+        """绘制思维导图 S 型水平平滑贝塞尔曲线 (Mind Map Horizontal S-Curve)"""
+        x1, y1 = p1
+        x2, y2 = p2
+        dx = x2 - x1
+        cp1x, cp1y = x1 + dx * 0.5, y1
+        cp2x, cp2y = x1 + dx * 0.5, y2
+
+        pts = []
+        for step in range(21):
+            t = step / 20.0
+            u = 1.0 - t
+            px = u*u*u*x1 + 3*u*u*t*cp1x + 3*u*t*t*cp2x + t*t*t*x2
+            py = u*u*u*y1 + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*y2
+            pts.extend([px, py])
+
+        if is_hovered or is_active:
+            self.canvas.create_line(pts, fill="#bfdbfe", width=3.5, tags="conn")
+            self.canvas.create_line(pts, fill="#2563eb", width=1.6, tags="conn")
+            mid_idx = 10 * 2
+            mx, my = pts[mid_idx], pts[mid_idx + 1]
+            self.canvas.create_oval(mx - 2.5, my - 2.5, mx + 2.5, my + 2.5, fill="#2563eb", outline="#ffffff", width=1.0, tags="conn")
+        elif is_dimmed:
+            self.canvas.create_line(pts, fill="#f1f5f9", width=1.0, tags="conn")
+        else:
+            self.canvas.create_line(pts, fill="#cbd5e1", width=1.2, tags="conn")
+
     def redraw(self):
         self.canvas.delete("all")
         self.nodes_data.clear()
@@ -450,39 +714,79 @@ class RadialFolderPeekApp:
         if w <= 10 or h <= 10:
             return
 
-        cx, cy = w // 2, h // 2
+        if self.camera_x is None:
+            if self.layout_mode == "tree":
+                self.camera_x = 160
+                self.camera_y = h // 2
+            else:
+                self.camera_x = w // 2
+                self.camera_y = h // 2
 
-        # 1. 绘制极简精工背景同心圆与中心环境光晕
-        self._draw_ambient_orbits(w, h, cx, cy)
+        hovered_path = self.hovered_node.get("path") if self.hovered_node else None
+        is_any_hovered = bool(hovered_path)
 
-        # 2. 核心：计算一级节点物理坐标 (自适应半径 + N>8 双阶双轨 + 物理防碰撞松弛)
-        self._calculate_l1_positions(cx, cy)
+        if self.layout_mode == "tree":
+            # === 思维导图模式 (零重叠，全称直显) ===
+            l2_nodes, cx, cy, root_w, root_h = self._calculate_mindmap_layout(w, h)
 
-        # 3. 准备二级子项（双阶错位外推防叠）
-        l2_nodes = []
-        if self.active_l1_node and "x" in self.active_l1_node:
-            l2_nodes = self._calculate_l2_nodes_anti_overlap(cx, cy)
+            # 1. 连线层 (低于节点卡片)
+            for item in self.l1_items:
+                is_hovered = (hovered_path and hovered_path == item["path"])
+                is_active = (self.active_l1_node and self.active_l1_node.get("path") == item["path"])
+                is_dimmed = False
+                if is_any_hovered:
+                    is_parent_of_hovered = (is_active and any(c.get("path") == hovered_path for c in l2_nodes))
+                    if not is_hovered and not is_parent_of_hovered:
+                        is_dimmed = True
+                p1 = (cx + root_w // 2, cy)
+                p2 = (item["x"] - item["w"] // 2, item["y"])
+                self._draw_tree_branch(p1, p2, is_hovered, is_active, is_dimmed)
 
-        # 4. 统一绘制所有柔和贝塞尔导引连线
-        self._draw_all_connections(cx, cy, l2_nodes)
+            for child in l2_nodes:
+                is_hovered = (hovered_path and hovered_path == child["path"])
+                is_dimmed = (is_any_hovered and not is_hovered)
+                parent = child["parent"]
+                p1 = (parent["x"] + parent["w"] // 2, parent["y"])
+                p2 = (child["x"] - child["w"] // 2, child["y"])
+                self._draw_tree_branch(p1, p2, is_hovered, False, is_dimmed)
 
-        # 5. 绘制二级节点卡片
-        for child in l2_nodes:
-            is_hovered = (self.hovered_node and self.hovered_node.get("path") == child["path"])
-            self._render_modern_card(child["x"], child["y"], child, level=2, is_active=False, is_hovered=is_hovered)
+            # 2. 二级节点卡片
+            for child in l2_nodes:
+                is_hovered = (hovered_path and hovered_path == child["path"])
+                self._render_modern_card(child["x"], child["y"], child, level=2, is_active=False, is_hovered=is_hovered)
 
-        # 6. 绘制一级节点卡片
-        for item in self.l1_items:
-            is_active = (self.active_l1_node and self.active_l1_node.get("path") == item["path"])
-            is_hovered = (self.hovered_node and self.hovered_node.get("path") == item["path"])
-            self._render_modern_card(item["x"], item["y"], item, level=1, is_active=is_active, is_hovered=is_hovered)
+            # 3. 一级节点卡片
+            for item in self.l1_items:
+                is_active = (self.active_l1_node and self.active_l1_node.get("path") == item["path"])
+                is_hovered = (hovered_path and hovered_path == item["path"])
+                self._render_modern_card(item["x"], item["y"], item, level=1, is_active=is_active, is_hovered=is_hovered)
 
-        # 7. 绘制中心主节点（Master Nucleus Capsule）
-        self._draw_center_card(cx, cy)
+            # 4. 根工作区卡片
+            self._draw_center_card(cx, cy, root_w, root_h)
 
-        # 8. 绘制悬停长文本全息浮窗 (Tooltip)
-        if self.hovered_node and self.hovered_node.get("is_truncated"):
-            self._draw_hover_tooltip(self.hovered_node)
+        else:
+            # === 星轨雷达模式 ===
+            cx = self.camera_x
+            cy = self.camera_y
+            self._draw_ambient_orbits(w, h, cx, cy)
+            self._calculate_l1_positions(cx, cy)
+
+            l2_nodes = []
+            if self.active_l1_node and "x" in self.active_l1_node:
+                l2_nodes = self._calculate_l2_nodes_anti_overlap(cx, cy)
+
+            self._draw_all_connections(cx, cy, l2_nodes)
+
+            for child in l2_nodes:
+                is_hovered = (hovered_path and hovered_path == child["path"])
+                self._render_modern_card(child["x"], child["y"], child, level=2, is_active=False, is_hovered=is_hovered)
+
+            for item in self.l1_items:
+                is_active = (self.active_l1_node and self.active_l1_node.get("path") == item["path"])
+                is_hovered = (hovered_path and hovered_path == item["path"])
+                self._render_modern_card(item["x"], item["y"], item, level=1, is_active=is_active, is_hovered=is_hovered)
+
+            self._draw_center_card(cx, cy)
 
     def _draw_ambient_orbits(self, w, h, cx, cy):
         """绘制清晰度提升的极坐标同心圆虚线 (Slate-300 #cbd5e1 与 #e2e8f0, 肉眼清晰可见)"""
@@ -509,13 +813,12 @@ class RadialFolderPeekApp:
         self.canvas.create_line(cx - cross_len, cy, cx + cross_len, cy, fill="#cbd5e1", width=1)
         self.canvas.create_line(cx, cy - cross_len, cx, cy + cross_len, fill="#cbd5e1", width=1)
 
-    def _draw_center_card(self, cx, cy):
-        """绘制中心核心工作区卡片 (Linear / Vercel Modern Nucleus)"""
+    def _draw_center_card(self, cx, cy, custom_w=None, custom_h=None):
+        """绘制中心核心工作区卡片 (Linear / Vercel Modern Nucleus: 全称直显，自适应动态宽度)"""
         folder_name = os.path.basename(self.current_path) or self.current_path
-        if len(folder_name) > 16:
-            folder_name = folder_name[:14] + ".."
-
-        w_box, h_box = 204, 62
+        name_w = self.font_main_bold.measure(folder_name)
+        w_box = custom_w or max(204, name_w + 90)
+        h_box = custom_h or 62
         x1, y1 = cx - w_box // 2, cy - h_box // 2
         x2, y2 = cx + w_box // 2, cy + h_box // 2
 
@@ -899,11 +1202,12 @@ class RadialFolderPeekApp:
         return trimmed_stem + ellipsis + ext, True
 
     def _render_modern_card(self, x, y, item, level, is_active, is_hovered):
-        # 尺寸规范：一级 176x44 (R14)，二级 158x38 (R12)
-        box_w, box_h = (176, 44) if level == 1 else (158, 38)
+        # 尺寸根据全文件名动态计算包裹
+        box_w = item.get("w", 176 if level == 1 else 158)
+        box_h = item.get("h", 44 if level == 1 else 38)
         card_r = 14 if level == 1 else 12
 
-        # 悬停微上浮态 (Hover lift: translateY(-2px))
+        # 悬停微上浮态
         draw_y = y - 2 if is_hovered else y
         x1, y1 = x - box_w // 2, draw_y - box_h // 2
         x2, y2 = x + box_w // 2, draw_y + box_h // 2
@@ -914,7 +1218,7 @@ class RadialFolderPeekApp:
         border_col = self.style["card_border_hover"] if is_hovered else (self.style["card_border_active"] if is_active else self.style["card_border"])
         border_w = 1.5 if (is_hovered or is_active) else 1.0
 
-        # 1. 现代弥散柔和多层阴影 (0 4px 20px -2px rgba(0,0,0,0.05), 悬停投影加深)
+        # 1. 弥散阴影
         if is_hovered or is_active:
             self.canvas.create_rectangle(x1 + 1, y1 + 3, x2 + 1, y2 + 6, fill="#e2e8f0", outline="", tags=(tag, "node"))
             self.canvas.create_rectangle(x1 + 2, y1 + 5, x2 + 2, y2 + 9, fill="#cbd5e1", outline="", tags=(tag, "node"))
@@ -922,11 +1226,11 @@ class RadialFolderPeekApp:
             self.canvas.create_rectangle(x1 + 1, y1 + 2, x2 + 1, y2 + 4, fill="#f1f5f9", outline="", tags=(tag, "node"))
             self.canvas.create_rectangle(x1 + 1, y1 + 1, x2 + 1, y2 + 2, fill="#e2e8f0", outline="", tags=(tag, "node"))
 
-        # 2. 纯白主体微毛玻璃卡片 (半透明微边框 1px)
+        # 2. 纯白主体微毛玻璃卡片
         self._draw_rounded_rect(x1, y1, x2, y2, radius=card_r, fill="#ffffff", outline=border_col, width=border_w, tags=(tag, "node"))
 
-        # 3. 左侧现代矢量微标容器 (低饱和品牌色点缀)
-        icon_box_size = 26 if level == 1 else 22
+        # 3. 左侧矢量微标容器
+        icon_box_size = item.get("ib_size", 26 if level == 1 else 22)
         ib_x1 = x1 + 9
         ib_y1 = draw_y - icon_box_size // 2
         ib_x2 = ib_x1 + icon_box_size
@@ -936,42 +1240,33 @@ class RadialFolderPeekApp:
         self._draw_rounded_rect(ib_x1, ib_y1, ib_x2, ib_y2, radius=8 if level == 1 else 6, fill=icon_bg, outline=border_col if is_hovered else "#e2e8f0", width=1, tags=(tag, "node"))
         self.canvas.create_text(ib_x1 + icon_box_size//2, draw_y, text=icon_char, font=("Segoe UI", 10 if level == 1 else 9), tags=(tag, "node"))
 
-        # 4. 右侧圆角胶囊角标 (Linear 风格: bg-slate-100 text-slate-500 rounded-full)
-        badge_w = 0
+        # 4. 右侧圆角胶囊角标
+        badge_w = item.get("badge_w", 0)
+        bx2 = x2 - 8
+        bx1 = bx2 - badge_w
         if item["is_dir"]:
             count = item.get("count", 0)
             if count > 0:
                 count_str = str(count)
-                badge_w = max(24, len(count_str) * 7 + 12)
                 badge_h = 18
-                bx2 = x2 - 8
-                bx1 = bx2 - badge_w
                 by1 = draw_y - badge_h // 2
                 by2 = by1 + badge_h
                 self._draw_rounded_rect(bx1, by1, bx2, by2, radius=9, fill="#f1f5f9", outline="#e2e8f0", width=1, tags=(tag, "node"))
                 self.canvas.create_text((bx1 + bx2)//2, draw_y, text=count_str, fill="#64748b", font=self.font_badge, tags=(tag, "node"))
         else:
             fmt_str = type_tag
-            badge_w = max(34, len(fmt_str) * 6 + 10)
             badge_h = 16
-            bx2 = x2 - 8
-            bx1 = bx2 - badge_w
             by1 = draw_y - badge_h // 2
             by2 = by1 + badge_h
             self._draw_rounded_rect(bx1, by1, bx2, by2, radius=8, fill="#f8fafc", outline="#e2e8f0", width=1, tags=(tag, "node"))
             self.canvas.create_text((bx1 + bx2)//2, draw_y, text=fmt_str, fill="#64748b", font=self.font_micro, tags=(tag, "node"))
 
-        # 5. 中间文件名：精确测量并防溢出截断
+        # 5. 中间文件名：100% 完整直接呈现，绝不截断或显示省略号
         text_start_x = ib_x2 + 8
-        text_end_x = (bx1 - 6) if badge_w > 0 else (x2 - 10)
-        available_pixel_width = max(30, text_end_x - text_start_x)
-
         font_used = self.font_main_bold if (is_active or is_hovered) else self.font_main
-        disp_text, is_truncated = self._truncate_text_to_width(item["name"], available_pixel_width, font_used, is_dir=item["is_dir"])
-        item["is_truncated"] = is_truncated
-
         text_color = self.style["text_hover"] if (is_hovered or is_active) else self.style["text_main"]
-        self.canvas.create_text(text_start_x, draw_y, text=disp_text, fill=text_color, anchor="w", font=font_used, tags=(tag, "node"))
+        item["is_truncated"] = False
+        self.canvas.create_text(text_start_x, draw_y, text=item["name"], fill=text_color, anchor="w", font=font_used, tags=(tag, "node"))
 
     def _draw_hover_tooltip(self, item):
         """当长文件名截断时，悬停在其上方浮现精致全名全息气泡"""
@@ -1021,7 +1316,7 @@ class RadialFolderPeekApp:
             self.hovered_node = matched
             need_redraw = True
 
-        if matched and matched["level"] == 1 and matched["is_dir"]:
+        if matched and matched.get("level") == 1 and matched.get("is_dir"):
             if self.active_l1_node != matched:
                 self.active_l1_node = matched
                 need_redraw = True
@@ -1037,12 +1332,24 @@ class RadialFolderPeekApp:
     def _on_single_click(self, event):
         if self.hovered_node:
             item = self.hovered_node
-            if item["is_dir"]:
+            if item.get("is_center"):
+                self.navigate_up()
+                return
+            if item.get("is_dir"):
                 self.history_stack.append(self.current_path)
                 self.render_path(item["path"])
+                self.reset_camera()
 
     def _on_double_click(self, event):
         if self.hovered_node:
+            if self.hovered_node.get("is_center"):
+                self.navigate_up()
+                return
+            if self.hovered_node.get("is_dir"):
+                self.history_stack.append(self.current_path)
+                self.render_path(self.hovered_node["path"])
+                self.reset_camera()
+                return
             try:
                 os.startfile(self.hovered_node["path"])
             except Exception as e:
